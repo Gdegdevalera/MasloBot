@@ -1,0 +1,155 @@
+﻿@page "/"
+
+@using MasloBot.Services
+@using Microsoft.AspNetCore.SignalR.Client
+@inject IJSRuntime JsRuntime
+@inject Persistence Persistence
+@inject NavigationManager NavigationManager
+@inject ITelegramService TelegramService
+@implements IDisposable
+
+<div class="sidebar">
+    <div class="top-row pl-4 navbar navbar-dark">
+        <a class="navbar-brand" href="">MasloBot</a>
+    </div>
+
+    <ul class="nav flex-column">
+        @foreach (var chat in chats)
+        {
+            <li class="nav-item px-3 nav-link">
+                <a @onclick="@(() => SetCurrent(chat))" style="cursor:pointer; padding-left: 10px">
+                    <span class="oi oi-person" aria-hidden="true"></span>
+                    @chat.Name<br />
+                    (@chat.Messages.Count сообщений)
+                </a>
+            </li>
+        }
+    </ul>
+</div>
+
+<div class="main">
+    <div class="content px-4">
+
+        @if (current != null)
+        {
+            <p>Чат с @current.Name: @userNames
+            </p>
+            <div class="msg_history">
+                @foreach (var message in current.Messages)
+                {
+                    @if (message.Type == MessageType.Service)
+                    {
+                        <div class="service-msg">
+                            <span class="date">@message.Date.ToLongTimeString()</span>
+                            <span style="padding-left: 10px">@message.Text</span>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="msg @(message.Type == MessageType.In ? "received" : "sent")">
+                            <div class="@(message.Type == MessageType.In ? "received-text" : "sent-text")">
+                                <div class="author">
+                                    @(message.Type == MessageType.In ? (message.User?.Name ?? "Неизвестный") : "Вы")
+                                </div>
+                                @message.Text
+                            </div>
+                            <div class="date">
+                                @message.Date.ToLongTimeString()
+                            </div>
+                        </div>
+                    }
+                }
+            </div>
+
+            @if (current.ChatId != null) 
+            {
+                <form @onsubmit="SendMessage">
+                    <div class="fixed-bottom send-input">
+                        <div class="input-group input-group-lg">
+                            <div class="input-group-prepend">
+                                <span class="input-group-text oi oi-arrow-circle-right"></span>
+                            </div>
+
+                            <input id="message-input" 
+                                   autocomplete="off" 
+                                   @bind="message" 
+                                   type="text" 
+                                   class="form-control" 
+                                   placeholder="@(!string.IsNullOrWhiteSpace(userNames) ? "Сообщение " + userNames : "Никого нет")" />
+
+                        </div>
+                    </div>
+                </form>
+            }
+        }
+
+    </div>
+</div>
+
+
+@code {
+    private HubConnection hubConnection;
+
+    private Chat current;
+    private List<Chat> chats;
+    private string userNames;
+    private string message;
+
+    protected override async Task OnInitializedAsync()
+    {
+        chats = Persistence.GetChats();
+
+        hubConnection = new HubConnectionBuilder()
+           .WithUrl(NavigationManager.ToAbsoluteUri("/chathub"))
+           .Build();
+
+        hubConnection.On("StateChanged", async () =>
+        {
+            var needToScroll = await JsRuntime.InvokeAsync<bool>("blazorExtensions.isScrolledToBottom");
+            chats = Persistence.GetChats();
+            if (current != null)
+            {
+                await SetCurrent(chats.FirstOrDefault(x => x.ChatId == current.ChatId));
+            }
+            StateHasChanged();
+            if (needToScroll)
+            {
+                await JsRuntime.InvokeAsync<object>("blazorExtensions.scrollToBottom");
+            }
+        });
+
+        await hubConnection.StartAsync();
+    }
+
+    private async Task SetCurrent(Chat chat)
+    {
+        current = chat;
+        message = null;
+        userNames = chat?.UserNames;
+        await JsRuntime.InvokeAsync<object>("blazorExtensions.focusElement", new object[] { "message-input" } );
+    }
+
+    protected async Task SendMessage()
+    {
+        if (current == null || string.IsNullOrEmpty(message) || current.ChatId == null)
+            return;
+
+        try
+        {
+            foreach(var user in current.Users)
+            {
+                await TelegramService.SendMessage(user.Id, message);
+            }
+        }
+        finally
+        {
+            message = null;
+        }
+
+    }
+
+    public void Dispose()
+    {
+        _ = hubConnection.DisposeAsync();
+    }
+}
